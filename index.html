@@ -988,7 +988,7 @@ function modalQuiz(st){
   else {
     const ok = st.ord[st.ans] === q.a;
     h += `<div class="explain"><span class="verdict" style="color:${ok?"#1f8f6d":"#c62f2f"}">${ok?"정답이에요! +1점":"아쉬워요!"}</span>${esc(q.e)}<span class="pg">교과서 ${q.p}쪽</span></div>`;
-    h += `<div class="m-actions">${mine ? `<button class="pbtn" data-act="quizNext">다음 모둠 차례로</button>` : `<span class="hint">${esc(teamName(st.team))}이(가) 넘기면 다음 차례예요.</span>`}</div>`;
+    h += `<div class="m-actions"><span class="hint"><b data-countdown="${st.ansAt||now()}">4</b>초 뒤 다음 모둠 차례로 넘어가요.</span>${mine ? `<button class="pbtn" data-act="quizNext">바로 넘기기</button>` : ""}</div>`;
   }
   return h;
 }
@@ -1012,7 +1012,15 @@ function modalGB(st){
   h += `<div class="gbteams">${S.teams.map((t,i)=>{ const r = st.res[i]||{}; return `<div class="gbt ${r.ok?"ok":"no"}"><span class="tn"><i style="background:${TEAM_COLORS[i]}"></i>${esc(t.name)}</span>${r.ok?"정답! +1점":(r.c===null&&!isLocal()?"제출 안 함":"오답")}</div>`; }).join("")}</div>`;
   return h + `<div class="m-actions">${teacher?`<button class="pbtn" data-act="gbDone">계속하기</button>`:`<span class="hint">곧 이어져요.</span>`}</div>`;
 }
-function tickBars(){ document.querySelectorAll(".tbar i").forEach(el=>{ el.style.width = Math.max(0, 100 - (now()-(+el.dataset.start))/(+el.dataset.dur)*100) + "%"; }); }
+let autoNexting = false;
+function nextAfterQuiz(){
+  if(autoNexting) return; autoNexting = true;
+  const at = S && S.step && S.step.at;
+  act(s=>{ if(!s.step || s.step.k!=="quiz" || s.step.at!==at || s.step.ans===null) return false; finishTurn(s); });
+  setTimeout(()=>autoNexting=false, 1500);
+}
+function tickBars(){
+  document.querySelectorAll("[data-countdown]").forEach(el=>{ el.textContent = Math.max(0, Math.ceil((4000 - (now() - (+el.dataset.countdown)))/1000)); }); document.querySelectorAll(".tbar i").forEach(el=>{ el.style.width = Math.max(0, 100 - (now()-(+el.dataset.start))/(+el.dataset.dur)*100) + "%"; }); }
 
 function renderEnd(){
   $("endTitle").textContent = S.winner!==null && S.winner!==undefined ? `${S.teams[S.winner].name} 말이 모두 골인! 게임 끝` : "게임 끝!";
@@ -1039,7 +1047,7 @@ document.addEventListener("click", e=>{
   if(b.dataset.mark !== undefined){ const i = +b.dataset.mark; act(s=>{ if(!s.step||s.step.k!=="gb") return false; s.step.marks[i] = !s.step.marks[i]; }); return; }
   if(b.dataset.team !== undefined){ chooseRole(b.dataset.team==="T" ? "T" : +b.dataset.team); return; }
   const a = b.dataset.act;
-  if(a==="quizNext") act(s=>{ if(!s.step||s.step.k!=="quiz") return false; finishTurn(s); });
+  if(a==="quizNext") nextAfterQuiz();
   if(a==="gbShowAns") act(s=>{ if(!s.step||s.step.k!=="gb") return false; s.step.showAns = true; });
   if(a==="gbReveal") revealGB();
   if(a==="gbDone") act(s=>{ if(!s.step||s.step.k!=="gb") return false; s.step = s.resume || null; s.resume = null; });
@@ -1054,7 +1062,7 @@ function answer(d){
   const st = S.step;
   if(st.k==="quiz"){
     if(st.ans!==null || !canAct(st.team)) return;
-    act(s=>{ const st = s.step; if(st.ans!==null) return false; st.ans = d; const ok = st.ord[d]===ALLQ[st.qi].a; if(ok) s.teams[st.team].quiz++; s.asked = (s.asked||[]).concat({qi:st.qi, team:st.team, ok}).slice(-60); });
+    act(s=>{ const st = s.step; if(st.ans!==null) return false; st.ans = d; st.ansAt = now(); const ok = st.ord[d]===ALLQ[st.qi].a; if(ok) s.teams[st.team].quiz++; s.asked = (s.asked||[]).concat({qi:st.qi, team:st.team, ok}).slice(-60); });
   } else if(st.k==="gb" && !isLocal()){
     const me = myTeam(); if(me===null || st.rev) return;
     const k = gbKey(S, st.round, me); if(gbAnswers[k]) return;
@@ -1161,6 +1169,12 @@ setInterval(()=>{
   if(!S || S.phase!=="play") return;
   tickBars();
   const st = S.step;
+  // 정답 확인 4초 뒤 자동으로 다음 모둠 차례 (문제 푼 모둠 기기가 넘기고, 그 기기가 없으면 선생님 기기가 대신)
+  if(st && st.k==="quiz" && st.ans!==null && !animBusy){
+    const el = now() - (st.ansAt || 0);
+    const mineAuto = role===st.team || role==="all" || (role==="T" && !onlineTeams().has(st.team));
+    if((mineAuto && el >= 4000) || (role==="T" && el >= 8000)) nextAfterQuiz();
+  }
   if(st && st.k==="gb" && !st.rev && !isLocal() && !revealing && role==="T"){
     if(Object.keys(gbFor(st)).length >= S.teams.length || now() > st.dl) revealGB();
   }
