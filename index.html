@@ -527,48 +527,57 @@ const deviceId = (()=>{ let d = ls.get("jy-device"); if(!d){ d = Math.random().t
 /* 세 가지: local(한 기기), firebase(여러 기기), demo(같은 브라우저 탭끼리 시험용, 주소 끝에 ?demo) */
 let offset = 0;
 const now = () => Date.now() + offset;
+/* 모둠 자리는 '창(탭)' 단위로 맡아요. 새로 고침해도 같은 창이면 자리가 유지돼요. */
+const tabId = (()=>{ let t = null; try{ t = sessionStorage.getItem("jy-tab"); }catch(e){} if(!t){ t = Math.random().toString(36).slice(2,10); try{ sessionStorage.setItem("jy-tab", t); }catch(e){} } return t; })();
 
 function makeLocalBackend(){
   return {
     kind:"local",
     join(){}, onState(cb){ cb(ls.get("jy-local-state")); },
     async write(s){ ls.set("jy-local-state", s); },
-    onGB(){}, async writeGB(){}, setPresence(){}, onPresence(){}, async exists(){ return false; }, leave(){}
+    onGB(){}, async writeGB(){}, onSeats(){}, async claimSeat(){ return true; }, releaseSeat(){}, async exists(){ return false; }, leave(){}
   };
 }
 function makeDemoBackend(){
   const ch = new BroadcastChannel("jy-demo");
-  const subs = {state:[], gb:[], pres:[]};
+  const subs = {state:[], gb:[], seats:[]};
   let code = null;
   const key = k => "jy-demo-"+code+"-"+k;
-  ch.onmessage = e => { const m=e.data; if(m.code!==code) return;
-    if(m.t==="state") subs.state.forEach(f=>f(ls.get(key("state"))));
-    if(m.t==="gb") subs.gb.forEach(f=>f(ls.get(key("gb"))||{}));
-    if(m.t==="pres") subs.pres.forEach(f=>f(ls.get(key("pres"))||{}));
-  };
+  const fire = t => { if(t==="state") subs.state.forEach(f=>f(ls.get(key("state")))); if(t==="gb") subs.gb.forEach(f=>f(ls.get(key("gb"))||{})); if(t==="seats") subs.seats.forEach(f=>f(ls.get(key("seats"))||{})); };
+  ch.onmessage = e => { if(e.data.code===code) fire(e.data.t); };
+  const bcast = t => { ch.postMessage({t, code}); fire(t); };
   return {
     kind:"demo",
     join(c){ code=c; },
     onState(cb){ subs.state.push(cb); cb(ls.get(key("state"))); },
     async write(s){ ls.set(key("state"), s); ch.postMessage({t:"state",code}); },
     onGB(cb){ subs.gb.push(cb); cb(ls.get(key("gb"))||{}); },
-    async writeGB(k,v){ const g=ls.get(key("gb"))||{}; g[k]=v; ls.set(key("gb"),g); ch.postMessage({t:"gb",code}); subs.gb.forEach(f=>f(g)); },
-    setPresence(role){ const p=ls.get(key("pres"))||{}; p[deviceId]={role,t:Date.now()}; ls.set(key("pres"),p); ch.postMessage({t:"pres",code}); subs.pres.forEach(f=>f(p)); },
-    onPresence(cb){ subs.pres.push(cb); cb(ls.get(key("pres"))||{}); },
+    async writeGB(k,v){ const g=ls.get(key("gb"))||{}; g[k]=v; ls.set(key("gb"),g); bcast("gb"); },
+    onSeats(cb){ subs.seats.push(cb); cb(ls.get(key("seats"))||{}); },
+    async claimSeat(team){ const s=ls.get(key("seats"))||{}; if(s[team] && s[team]!==tabId) return false; s[team]=tabId; ls.set(key("seats"),s); bcast("seats"); return true; },
+    releaseSeat(team){ const s=ls.get(key("seats"))||{}; if(s[team]===tabId){ delete s[team]; ls.set(key("seats"),s); bcast("seats"); } },
     async exists(c){ return !!ls.get("jy-demo-"+c+"-state"); },
-    leave(){ subs.state=[];subs.gb=[];subs.pres=[]; }
+    leave(){ subs.state=[]; subs.gb=[]; subs.seats=[]; }
   };
 }
 async function makeFirebaseBackend(cfg){
   const V = "10.12.2";
   const appMod = await import(`https://www.gstatic.com/firebasejs/${V}/firebase-app.js`);
   const dbMod = await import(`https://www.gstatic.com/firebasejs/${V}/firebase-database.js`);
-  const {getDatabase, ref, set, onValue, onDisconnect, get, serverTimestamp, off} = dbMod;
+  const {getDatabase, ref, set, onValue, onDisconnect, get, serverTimestamp, runTransaction, remove} = dbMod;
   const app = appMod.initializeApp(cfg);
   const db = getDatabase(app);
   onValue(ref(db, ".info/serverTimeOffset"), s => { offset = s.val() || 0; });
-  let code = null; const unsubs = [];
+  let code = null, mySeat = null; const unsubs = [];
   const p = k => `rooms/${code}/${k}`;
+  async function claim(team){
+    const r = ref(db, p("seats/"+team));
+    const res = await runTransaction(r, cur => (!cur || cur === tabId) ? tabId : undefined);
+    if(res.committed){ mySeat = team; onDisconnect(r).remove(); return true; }
+    return false;
+  }
+  // 연결이 잠깐 끊겼다 다시 이어지면 내 자리를 다시 맡아요
+  onValue(ref(db, ".info/connected"), s => { if(s.val() === true && code && mySeat !== null) claim(mySeat).catch(()=>{}); });
   return {
     kind:"firebase",
     join(c){ code=c; },
@@ -576,8 +585,9 @@ async function makeFirebaseBackend(cfg){
     async write(s){ await set(ref(db,p("state")), {json:JSON.stringify(s), v:s.v, t:serverTimestamp()}); },
     onGB(cb){ unsubs.push(onValue(ref(db,p("gb")), s => cb(s.val()||{}))); },
     async writeGB(k,v){ await set(ref(db,p("gb/"+k)), v); },
-    setPresence(role){ const r = ref(db, p("presence/"+deviceId)); set(r,{role, t:serverTimestamp()}); onDisconnect(r).remove(); },
-    onPresence(cb){ unsubs.push(onValue(ref(db,p("presence")), s => cb(s.val()||{}))); },
+    onSeats(cb){ unsubs.push(onValue(ref(db,p("seats")), s => cb(s.val()||{}))); },
+    claimSeat: claim,
+    releaseSeat(team){ const r = ref(db, p("seats/"+team)); get(r).then(s=>{ if(s.val()===tabId) remove(r); }).catch(()=>{}); if(mySeat===team) mySeat = null; },
     async exists(c){ const s = await get(ref(db,`rooms/${c}/state`)); return s.exists(); },
     leave(){ unsubs.splice(0).forEach(u=>{ try{u();}catch(e){} }); }
   };
@@ -586,7 +596,7 @@ async function makeFirebaseBackend(cfg){
 
 /* ============================== 앱 상태 ============================== */
 let backend = null, netBackend = null, S = null, role = null, room = null;
-let gbAnswers = {}, presence = {}, writeChain = Promise.resolve(), screen = "home";
+let gbAnswers = {}, seats = {}, writeChain = Promise.resolve(), screen = "home";
 let seenThrowAt = 0, seenMoveAt = 0, seenLog = new Set(), firstState = true;
 let animQ = [], animBusy = false, override = {}, modalKey = "", revealing = false;
 
@@ -896,7 +906,8 @@ function render(){
   show("sGame");
   drawTokens(); renderTeams(); renderTurn(); renderModal();
 }
-function onlineTeams(){ const set = new Set(); Object.values(presence||{}).forEach(p=>{ if(p && typeof p.role==="number") set.add(p.role); }); return set; }
+function onlineTeams(){ const set = new Set(); Object.keys(seats||{}).forEach(k=>{ if(seats[k]) set.add(+k); }); return set; }
+const takenByOther = i => !!(seats && seats[i] && seats[i] !== tabId);
 function renderLobby(){
   $("lobbyCode").textContent = isLocal() ? "" : room;
   const on = onlineTeams();
@@ -910,7 +921,7 @@ function renderPick(){
   const on = onlineTeams();
   $("pickWrap").hidden = false;
   $("joinMsg").textContent = S.phase==="end" ? "이 방의 게임은 끝났어요." : `방 ${room}을(를) 찾았어요.`;
-  $("teamPick").innerHTML = S.teams.map((t,i)=>`<button data-team="${i}" class="${on.has(i)?"on":""}"><span class="dot" style="background:${TEAM_COLORS[i]}"></span>${esc(t.name)}<small>${on.has(i)?"다른 기기가 접속함":"비어 있음"}</small></button>`).join("")
+  $("teamPick").innerHTML = S.teams.map((t,i)=>{ const other = takenByOther(i); return `<button data-team="${i}" class="${on.has(i)?"on":""}" ${other?"disabled":""}><span class="dot" style="background:${TEAM_COLORS[i]}"></span>${esc(t.name)}<small>${other?"다른 기기가 사용 중":on.has(i)?"이 기기":"비어 있음"}</small></button>`; }).join("")
     + (IS_TEACHER ? `<button data-team="T"><span class="dot" style="background:#9aa3c4"></span>선생님<small>진행·관리</small></button>` : "");
 }
 function renderTeams(){
@@ -1117,19 +1128,28 @@ async function findRoom(){
 }
 function chooseRole(r){
   if(r==="T" && !IS_TEACHER) return;
-  role = r; backend.setPresence(r); ls.set("jy-session", {mode:"net", room, role:r}); screen = "game"; modalKey=""; render();
+  if(typeof r === "number"){
+    if(takenByOther(r)){ $("joinMsg").textContent = "이미 다른 기기가 고른 모둠이에요. 우리 모둠이 맞는지 확인해 주세요."; return; }
+    backend.claimSeat(r).then(ok=>{
+      if(!ok){ $("joinMsg").textContent = "방금 다른 기기가 이 모둠을 골랐어요. 우리 모둠이 맞는지 확인해 주세요."; return; }
+      role = r; ls.set("jy-session", {mode:"net", room, role:r}); screen = "game"; modalKey=""; render();
+    }).catch(()=>{ $("joinMsg").textContent = "연결하지 못했어요. 다시 눌러 주세요."; });
+    return;
+  }
+  role = r; ls.set("jy-session", {mode:"net", room, role:r}); screen = "game"; modalKey=""; render();
 }
 let connected = false;
 function connect(){
   if(connected) return; connected = true;
   backend.onState(s=>setState(s, true));
   backend.onGB(g=>{ gbAnswers = g||{}; if(S){ modalKey=""; render(); } });
-  backend.onPresence(p=>{ presence = p||{}; if(S) render(); });
-  if(role!==null) backend.setPresence(role);
+  backend.onSeats(p=>{ seats = p||{}; if(S) render(); });
+  if(typeof role === "number"){ const r = role; backend.claimSeat(r).then(ok=>{ if(!ok && role===r){ role = null; screen = "join"; ls.set("jy-session", {mode:"net", room, role:null}); render(); $("joinMsg").textContent = "다른 기기가 이 모둠을 쓰고 있어요. 모둠을 다시 골라 주세요."; } }).catch(()=>{}); }
 }
 function leave(){
+  if(backend && typeof role === "number") backend.releaseSeat(role);
   if(backend && backend.kind!=="local") backend.leave();
-  connected = false; backend = null; S = null; role = null; room = null; gbAnswers = {}; presence = {}; animQ = []; animBusy = false; override = {};
+  connected = false; backend = null; S = null; role = null; room = null; gbAnswers = {}; seats = {}; animQ = []; animBusy = false; override = {};
   ls.del("jy-session"); hideModal(); screen = IS_TEACHER ? "home" : "join"; prepJoin(); render();
 }
 function toast(text){
