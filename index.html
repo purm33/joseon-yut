@@ -168,6 +168,8 @@ input[type=text],input[type=tel]{background:var(--ink);border:1px solid var(--li
 .m-head .tag{padding:4px 10px;border-radius:999px;color:#fff;font-weight:700}
 .m-head .team-tag{display:inline-flex;align-items:center;gap:6px;font-weight:700}
 .m-head .team-tag i{width:14px;height:14px;border-radius:50%;display:inline-block}
+.tleft{font-family:var(--display);font-weight:900;font-size:20px;min-width:2.6em;text-align:right;font-variant-numeric:tabular-nums}
+.tleft.hurry{color:#c62f2f}
 .tbar{flex:1;min-width:120px;height:8px;border-radius:4px;background:#ddd6c6;overflow:hidden}
 .tbar i{display:block;height:100%;background:var(--red);width:100%;transition:width .3s linear}
 .modal .q{font-size:clamp(22px,3vw,32px);line-height:1.35;font-weight:700}
@@ -681,11 +683,11 @@ function doThrow(){
     if(n>=4) s.extra++;
     s.lastThrow = {team:ti, sticks, name, n, at:now()};
     const opts = moveOptions(s, ti, n);
-    if(opts.length===1) applyMove(s, ti, opts[0].src, n, opts[0].route);
+    if(opts.length===1) applyMove(s, ti, opts[0].src, n, opts[0].route, true);
     else s.step = {k:"choose", team:ti, n, name, opts};
   });
 }
-function applyMove(s, ti, src, n, route){
+function applyMove(s, ti, src, n, route, fromThrow){
   const t = s.teams[ti];
   let idx = []; t.pieces.forEach((p,i)=>{ if(p===src) idx.push(i); });
   if(src==="off") idx = idx.slice(0,1);
@@ -701,11 +703,19 @@ function applyMove(s, ti, src, n, route){
   s.lastMove = {team:ti, idx, src, path, caps, at:now()};
   if(t.pieces.every(p=>p==="home")){ s.phase = "end"; s.step = null; s.winner = ti; return; }
   if(s.extra > 0){ s.extra--; s.step = null; if(!caps.length) addLog(s, `${t.name} ${s.lastThrow.name}! 한 번 더 던져요.`); return; }
-  startQuiz(s, ti);
+  // 윷·말 움직이는 애니메이션이 끝나고 문제가 뜨는 때부터 시간을 재요
+  startQuiz(s, ti, (fromThrow ? 1450 : 0) + path.length*280 + 400);
 }
-function startQuiz(s, ti){
+const QUIZ_MS = 10000, NEXT_MS = 3000, TIMEOUT_NEXT_MS = 3000;
+function startQuiz(s, ti, delay){
   const qi = draw(s, "used", ALLQ);
-  s.step = {k:"quiz", team:ti, qi, ord:optOrder(ALLQ[qi]), ans:null, at:now()};
+  const start = now() + (delay||0);
+  s.step = {k:"quiz", team:ti, qi, ord:optOrder(ALLQ[qi]), ans:null, at:now(), start, dl:start+QUIZ_MS};
+}
+function quizTimeout(){
+  const at = S.step.at;
+  act(s=>{ const st = s.step; if(!st || st.k!=="quiz" || st.at!==at || st.ans!==null) return false;
+    st.ans = -1; st.ansAt = now(); s.asked = (s.asked||[]).concat({qi:st.qi, team:st.team, ok:false}).slice(-60); });
 }
 function finishTurn(s){ s.step = null; s.extra = 0; const o = s.order || s.teams.map((_,i)=>i); s.turn = o[(o.indexOf(s.turn)+1) % o.length]; }
 function startGB(s){ const gi = draw(s, "usedGB", GB); s.gbRound = (s.gbRound||0)+1; s.step = {k:"gb", by:"T", gi, ord:optOrder(GB[gi]), round:s.gbRound, at:now(), dl:now()+45000, rev:false, res:null, marks:{}}; }
@@ -982,13 +992,14 @@ function optsHTML(q, ord, o){
 }
 function modalQuiz(st){
   const q = ALLQ[st.qi], era = ERAS[q.era], answered = st.ans !== null, mine = canAct(st.team);
-  let h = `<div class="m-head"><span class="tag" style="background:${era.color}">${era.name}</span>${teamTag(st.team)} 문제 · 맞히면 +1점${answered?"":`<span class="tbar"><i data-start="${st.at}" data-dur="40000"></i></span>`}</div>`;
+  let h = `<div class="m-head"><span class="tag" style="background:${era.color}">${era.name}</span>${teamTag(st.team)} 문제 · 맞히면 +1점${answered?"":`<span class="tleft" data-left="${st.dl||st.at+QUIZ_MS}">10초</span><span class="tbar"><i data-start="${st.start||st.at}" data-dur="${QUIZ_MS}"></i></span>`}</div>`;
   h += `<h2 class="q">${esc(q.q)}</h2>` + optsHTML(q, st.ord, {reveal:answered, chosen:st.ans, disabled: answered || !mine});
   if(!answered) h += `<div class="m-actions"><span class="hint">${mine ? "모둠원과 상의해서 답을 골라요." : `${esc(teamName(st.team))}이(가) 답을 고르고 있어요. 같이 생각해 봐요!`}</span></div>`;
   else {
     const ok = st.ord[st.ans] === q.a;
-    h += `<div class="explain"><span class="verdict" style="color:${ok?"#1f8f6d":"#c62f2f"}">${ok?"정답이에요! +1점":"아쉬워요!"}</span>${esc(q.e)}<span class="pg">교과서 ${q.p}쪽</span></div>`;
-    h += `<div class="m-actions"><span class="hint"><b data-countdown="${st.ansAt||now()}">4</b>초 뒤 다음 모둠 차례로 넘어가요.</span>${mine ? `<button class="pbtn" data-act="quizNext">바로 넘기기</button>` : ""}</div>`;
+    const late = st.ans === -1, wait = late ? TIMEOUT_NEXT_MS : NEXT_MS;
+    h += `<div class="explain"><span class="verdict" style="color:${ok?"#1f8f6d":"#c62f2f"}">${ok?"정답이에요! +1점":late?"시간 초과! 정답은 초록색이에요":"아쉬워요!"}</span>${esc(q.e)}<span class="pg">교과서 ${q.p}쪽</span></div>`;
+    h += `<div class="m-actions"><span class="hint"><b data-countdown="${st.ansAt||now()}" data-wait="${wait}">${wait/1000}</b>초 뒤 다음 모둠 차례로 넘어가요.</span>${mine ? `<button class="pbtn" data-act="quizNext">바로 넘기기</button>` : ""}</div>`;
   }
   return h;
 }
@@ -1020,7 +1031,8 @@ function nextAfterQuiz(){
   setTimeout(()=>autoNexting=false, 1500);
 }
 function tickBars(){
-  document.querySelectorAll("[data-countdown]").forEach(el=>{ el.textContent = Math.max(0, Math.ceil((4000 - (now() - (+el.dataset.countdown)))/1000)); }); document.querySelectorAll(".tbar i").forEach(el=>{ el.style.width = Math.max(0, 100 - (now()-(+el.dataset.start))/(+el.dataset.dur)*100) + "%"; }); }
+  document.querySelectorAll("[data-countdown]").forEach(el=>{ el.textContent = Math.max(0, Math.ceil(((+el.dataset.wait||NEXT_MS) - (now() - (+el.dataset.countdown)))/1000)); });
+  document.querySelectorAll("[data-left]").forEach(el=>{ const ms = (+el.dataset.left) - now(); el.textContent = Math.min(QUIZ_MS/1000, Math.max(0, Math.ceil(ms/1000))) + "초"; el.classList.toggle("hurry", ms < 4000); }); document.querySelectorAll(".tbar i").forEach(el=>{ el.style.width = Math.max(0, 100 - (now()-(+el.dataset.start))/(+el.dataset.dur)*100) + "%"; }); }
 
 function renderEnd(){
   $("endTitle").textContent = S.winner!==null && S.winner!==undefined ? `${S.teams[S.winner].name} 말이 모두 골인! 게임 끝` : "게임 끝!";
@@ -1169,11 +1181,17 @@ setInterval(()=>{
   if(!S || S.phase!=="play") return;
   tickBars();
   const st = S.step;
-  // 정답 확인 4초 뒤 자동으로 다음 모둠 차례 (문제 푼 모둠 기기가 넘기고, 그 기기가 없으면 선생님 기기가 대신)
+  // 정답 확인 3초 뒤 자동으로 다음 모둠 차례 (문제 푼 모둠 기기가 넘기고, 그 기기가 없으면 선생님 기기가 대신)
   if(st && st.k==="quiz" && st.ans!==null && !animBusy){
-    const el = now() - (st.ansAt || 0);
+    const el = now() - (st.ansAt || 0), wait = st.ans === -1 ? TIMEOUT_NEXT_MS : NEXT_MS;
     const mineAuto = role===st.team || role==="all" || (role==="T" && !onlineTeams().has(st.team));
-    if((mineAuto && el >= 4000) || (role==="T" && el >= 8000)) nextAfterQuiz();
+    if((mineAuto && el >= wait) || (role==="T" && el >= wait + 4000)) nextAfterQuiz();
+  }
+  // 10초가 지나면 오답 처리
+  if(st && st.k==="quiz" && st.ans===null && !animBusy && st.dl){
+    const over = now() - st.dl;
+    const mineAuto = role===st.team || role==="all" || (role==="T" && !onlineTeams().has(st.team));
+    if((mineAuto && over >= 0) || (role==="T" && over >= 3000)) quizTimeout();
   }
   if(st && st.k==="gb" && !st.rev && !isLocal() && !revealing && role==="T"){
     if(Object.keys(gbFor(st)).length >= S.teams.length || now() > st.dl) revealGB();
